@@ -19,6 +19,10 @@ To split an article across multiple URLs, enable **Allow Page Numbers** in the t
 3. To split articles across URLs, enable **Allow Page Numbers** under the template’s **URLs** settings. Use one paginated article field per template.
 4. For the supplied styling, link to `article-pagination.css` from the template. The module’s classes can also be styled in the site stylesheet.
 
+## Usage
+
+Pages can be split either using the original five hyphens or by setting it to split the pages at a heading - H2 probably.
+
 Put five or more hyphens on their own line or in their own rich-text paragraph. Add a title after the hyphens to name the next part. A marker in a heading keeps that heading visible on the next page.
 
 ```text
