@@ -5,6 +5,8 @@ A standalone ProcessWire Textformatter for plain Textarea, TinyMCE, and other ed
 ## About
 This Textformatter was created using ChatGPT Codex for a specific use I have. I prompted Codex to create a standalone version and add additional markup inline with Ryan Cramer's original Textformatter. [TextformatterPagination](https://processwire.com/modules/textformatter-pagination/)
 
+Released under the MIT License.
+
 ## Requirements
 
 - A ProcessWire site running PHP 8.4 or newer with the PHP DOM extension enabled.
@@ -14,7 +16,8 @@ To split an article across multiple URLs, enable **Allow Page Numbers** in the t
 
 ## Installation
 
-1. Install **Article Pagination and Contents** under Modules.
+1. Download the repository ZIP, extract it, and place the extracted folder at site/modules/TextformatterArticlePagination/. If the ZIP gives the folder a different name, rename it before installing the module under Modules.
+2. Install **Article Pagination and Contents** under Modules.
 2. In the article field’s **Details** tab, add it under **Textformatters**. Render the formatted field value in the template.
 3. To split articles across URLs, enable **Allow Page Numbers** under the template’s **URLs** settings. Use one paginated article field per template.
 4. For the supplied styling, link to `article-pagination.css` from the template. The module’s classes can also be styled in the site stylesheet.
