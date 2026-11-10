@@ -2,6 +2,18 @@
 
 A standalone ProcessWire Textformatter for plain Textarea, TinyMCE, and other editors backed by a Textarea field. It uses PHP 8.4 or newer with the DOM extension for HTML5 parsing.
 
+## About
+This Textformatter was created using ChatGPT Codex for a specific use I have. I prompted Codex to create a standalone version and add additional markup inline with Ryan Cramer's original Textformatter. [TextformatterPagination](https://processwire.com/modules/textformatter-pagination/)
+
+## Requirements
+
+- A ProcessWire site running PHP 8.4 or newer with the PHP DOM extension enabled.
+- A ProcessWire Textarea field for the article. This can be a plain Textarea or a rich-text field using TinyMCE.
+
+To split an article across multiple URLs, enable **Allow Page Numbers** in the template’s **URLs** settings. A single-page Contents box with heading links works without this setting.
+
+## Installation
+
 1. Install **Article Pagination and Contents** under Modules.
 2. In the article field’s **Details** tab, add it under **Textformatters**. Render the formatted field value in the template.
 3. To split articles across URLs, enable **Allow Page Numbers** under the template’s **URLs** settings. Use one paginated article field per template.
