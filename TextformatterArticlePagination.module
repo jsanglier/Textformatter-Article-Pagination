@@ -1,0 +1,270 @@
+<?php namespace ProcessWire;
+
+class TextformatterArticlePagination extends Textformatter implements ConfigurableModule {
+    private const PAGER_BOUNDARY = '<!-- TextformatterArticlePagination pager -->';
+    private const DEFAULTS = [
+        'numbered' => 1, 'neighbours' => 1, 'partList' => 0, 'autoContents' => 0,
+        'headings' => 'all', 'contentsTitle' => 'Contents',
+    ];
+    private ?\WeakMap $partInfo = null;
+
+    public static function getModuleInfo() {
+        return [
+            'title' => 'Article Pagination and Contents',
+            'version' => 2,
+            'summary' => 'Split a Textarea article at hyphen lines or headings and generate navigation and heading links.',
+            'requires' => ['PHP>=8.4.0'],
+        ];
+    }
+
+    public function getModuleConfigInputfields(array $data) {
+        $modules = $this->wire()->modules;
+        $form = $this->wire(new InputfieldWrapper());
+        $data += self::DEFAULTS;
+        foreach([
+            'numbered'=>'Numbered pager', 'neighbours'=>'Titled previous and next links',
+            'partList'=>'List part titles at the end', 'autoContents'=>'Add Contents at the start when there is no marker',
+        ] as $name => $label) {
+            $input = $modules->get('InputfieldCheckbox');
+            $input->name = $name;
+            $input->label = $label;
+            $input->checked = (bool)$data[$name];
+            $form->add($input);
+        }
+        $levels = $modules->get('InputfieldSelect');
+        $levels->name = 'headings';
+        $levels->label = 'Default headings in Contents';
+        $levels->addOptions(['all'=>'H2 and H3', 'h2'=>'H2 only', 'h3'=>'H3 only', 'none'=>'No headings']);
+        $levels->value = $data['headings'];
+        $form->add($levels);
+        $title = $modules->get('InputfieldText');
+        $title->name = 'contentsTitle';
+        $title->label = 'Contents title';
+        $title->value = $data['contentsTitle'];
+        $form->add($title);
+        return $form;
+    }
+
+    public function formatValue(Page $page, Field $field, &$value) {
+        if(isset($this->partInfo[$page][$field->name])) unset($this->partInfo[$page][$field->name]);
+        if(!is_string($value) || $value === '' || !class_exists(\Dom\HTMLDocument::class)) return;
+        $settings = array_intersect_key($this->getArray(), self::DEFAULTS) + self::DEFAULTS;
+        if(!$settings['autoContents'] && !str_contains($value, '-----') && !str_contains($value, '[contents')) return;
+
+        $html = $value;
+        if(!preg_match('/<[a-z][\w:-]*(?:\s|\/?>)/i', $value)) {
+            $html = '';
+            foreach(preg_split('/\R/', $value) as $line) {
+                if(trim($line) !== '') $html .= '<p>'.$this->escape($line).'</p>';
+            }
+        }
+        $document = \Dom\HTMLDocument::createFromString('<!doctype html><html><body>'.$html.'</body></html>', LIBXML_NOERROR, 'UTF-8');
+        $body = $document->getElementsByTagName('body')->item(0);
+        $contentsPattern = '/^\[contents(?:\s+([^\]]+))?\]$/D';
+        $articleOptions = $this->contentsOptions('', $settings['headings']);
+        foreach($body->childNodes as $node) {
+            if($node instanceof \Dom\Element && $node->localName==='p' && preg_match($contentsPattern, trim($node->textContent), $match)) {
+                $articleOptions = $this->contentsOptions($match[1] ?? '', $settings['headings']);
+                break;
+            }
+        }
+        $split = $articleOptions['split'];
+        $parts = [];
+        $part = ['title'=>(string)$page->title, 'nodes'=>[], 'headings'=>[]];
+        $hasBreak = false;
+        $partHasBody = false;
+        $sharedFilters = null;
+        foreach($body->childNodes as $node) {
+            $tag = $node instanceof \Dom\Element ? $node->localName : '';
+            $isParagraph = $tag === 'p';
+            $isHeading = preg_match('/^h[1-6]$/D', $tag);
+            $label = trim(str_replace("\u{00a0}", ' ', $node->textContent));
+            if($split==='hyphens' && ($isParagraph || $isHeading) && preg_match('/^-{5,}\s*(.*)$/sD', $label, $match)) {
+                $hasBreak = true;
+                if($part['nodes']) $parts[] = $part;
+                $title = trim($match[1] ?? '');
+                $part = ['title'=>$title, 'nodes'=>[], 'headings'=>[]];
+                if($isHeading && $title !== '') {
+                    $node->textContent = $title;
+                    $part['nodes'][] = $node;
+                }
+                continue;
+            }
+            if($split!=='hyphens' && $tag===$split && $label!=='' && $page->template->allowPageNum) {
+                if($partHasBody) {
+                    $parts[] = $part;
+                    $part = ['nodes'=>[], 'headings'=>[]];
+                    $hasBreak = true;
+                }
+                $part['title'] = $label;
+                $part['startHeading'] = $node;
+            }
+            if($node->nodeType === XML_TEXT_NODE && $label === '') continue;
+            if($isParagraph && preg_match($contentsPattern, $label, $match)) {
+                $options = $this->contentsOptions($match[1] ?? '', $settings['headings']);
+                $sharedFilters ??= ['pages'=>$options['pages'], 'headings'=>$options['headings']];
+                $part['nodes'][] = $sharedFilters+$options;
+            } else {
+                $part['nodes'][] = $node;
+                if($node->nodeType!==XML_COMMENT_NODE && (!$isParagraph || $label!=='' || $node->querySelector('img, video, audio, iframe'))) $partHasBody = true;
+            }
+        }
+        if($part['nodes'] || !$parts) $parts[] = $part;
+        if(!$hasBreak && $sharedFilters===null && !$settings['autoContents']) return;
+        if($hasBreak && !$page->template->allowPageNum) return;
+
+        $ids = [];
+        foreach($body->querySelectorAll('[id]') as $element) $ids[$element->getAttribute('id')] = true;
+        foreach($parts as $index => &$part) {
+            if($part['title'] === '') $part['title'] = 'Part '.($index+1);
+            foreach($part['nodes'] as $node) {
+                if(!$node instanceof \Dom\Element || !in_array($node->localName, ['h2','h3'], true) || trim($node->textContent)==='') continue;
+                $id = $node->getAttribute('id');
+                if($id === null || $id === '') {
+                    $base = 'article-'.$this->wire()->sanitizer->pageName($node->textContent, Sanitizer::translate);
+                    $id = $base;
+                    for($suffix=2;isset($ids[$id]);$suffix++) $id = $base.'-'.$suffix;
+                    $ids[$id] = true;
+                    $node->setAttribute('id', $id);
+                }
+                $part['headings'][] = ['level'=>$node->localName, 'title'=>trim($node->textContent), 'id'=>$id,
+                    'startsPart'=>$node===($part['startHeading'] ?? null)];
+            }
+        }
+        unset($part);
+
+        $multi = count($parts)>1;
+        $number = $multi && $page->id===$this->wire()->page?->id ? max(1,(int)$this->wire()->input->pageNum()) : 1;
+        if(!isset($parts[$number-1])) throw new Wire404Exception();
+        $url = fn(int $n): string => $page->url(['pageNum'=>$n]);
+        $output = '';
+        if($sharedFilters===null && $settings['autoContents']) {
+            $output .= $this->contents($parts,$number,$url,$this->contentsOptions('', $settings['headings']),$settings['contentsTitle']);
+        }
+        foreach($parts[$number-1]['nodes'] as $node) {
+            $output .= is_array($node)
+                ? $this->contents($parts,$number,$url,$node,$settings['contentsTitle'])
+                : $document->saveHtml($node);
+        }
+        if($multi && $articleOptions['paginate'] !== 'off') {
+            $pager = $this->pager($parts,$number,$url,$settings,$articleOptions);
+            if($pager !== '') $output .= self::PAGER_BOUNDARY.$pager;
+        }
+        $this->partInfo ??= new \WeakMap();
+        $this->partInfo[$page] ??= [];
+        $this->partInfo[$page][$field->name] = [
+            'number'=>$number, 'count'=>count($parts), 'title'=>$parts[$number-1]['title'],
+        ];
+        $value = $output;
+    }
+
+    /** Read the part details after retrieving the formatted field value. */
+    public function getPartInfo(Page $page, string $fieldName): array {
+        return $this->partInfo[$page][$fieldName] ?? [
+            'number'=>1, 'count'=>1, 'title'=>(string)$page->title,
+        ];
+    }
+
+    /** Separate the generated footer from an already formatted Textarea value. */
+    public function splitOutput(string $formatted): array {
+        $boundary = strrpos($formatted, self::PAGER_BOUNDARY);
+        if($boundary === false) return ['body'=>$formatted, 'pager'=>''];
+        $pager = substr($formatted, $boundary+strlen(self::PAGER_BOUNDARY));
+        if(!str_starts_with($pager, '<nav class="article-pagination"')) {
+            return ['body'=>$formatted, 'pager'=>''];
+        }
+        return ['body'=>substr($formatted, 0, $boundary), 'pager'=>$pager];
+    }
+
+    private function contentsOptions(string $marker, string $headings): array {
+        $options = ['pages'=>'on','headings'=>$headings,'width'=>'full','align'=>'left','wrap'=>'off','split'=>'hyphens',
+            'paginate'=>'default','named'=>'default'];
+        $allowed = [
+            'pages'=>['on','off'], 'headings'=>['all','h2','h3','none'], 'width'=>['small','medium','large','full'],
+            'align'=>['left','center','right'], 'wrap'=>['on','off'],
+            'split'=>['hyphens','h1','h2','h3','h4','h5','h6'],
+            'paginate'=>['default','horizontal','off'], 'named'=>['default','on','off'],
+        ];
+        foreach(preg_split('/\s+/', trim($marker)) as $token) {
+            [$key,$value] = array_pad(explode('=', $token, 2), 2, '');
+            if(isset($allowed[$key]) && in_array($value, $allowed[$key], true)) $options[$key] = $value;
+        }
+        return $options;
+    }
+
+    private function contents(array $parts, int $current, callable $url, array $options, string $title): string {
+        $items = '';
+        $showParts = count($parts)>1 && $options['pages']==='on';
+        foreach($parts as $index => $part) {
+            $number = $index+1;
+            $headings = '';
+            foreach($part['headings'] as $heading) {
+                if($showParts && $heading['startsPart']) continue;
+                if($options['headings']!=='all' && $options['headings']!==$heading['level']) continue;
+                $href = ($number===$current ? '' : $url($number)).'#'.rawurlencode($heading['id']);
+                $headings .= '<li class="article-contents-'.$heading['level'].'">'.$this->link($href, $heading['title']).'</li>';
+            }
+            if($showParts) {
+                $items .= '<li>'.$this->link($url($number), $part['title'], $number===$current ? ' aria-current="page"' : '');
+                if($headings !== '') $items .= '<ol>'.$headings.'</ol>';
+                $items .= '</li>';
+            } else {
+                $items .= $headings;
+            }
+        }
+        if($items === '') return '';
+        $class = 'article-contents article-contents-'.$options['width'].' article-contents-'.$options['align'];
+        if($options['wrap']==='on' && $options['width']!=='full' && $options['align']!=='center') $class .= ' article-contents-wrap';
+        $title = trim($title) ?: 'Contents';
+        return '<nav class="'.$class.'" aria-label="'.$this->escape($title).'"><h2>'.$this->escape($title).'</h2><ol>'.$items.'</ol></nav>';
+    }
+
+    private function pager(array $parts, int $current, callable $url, array $settings, array $options): string {
+        $output = '';
+        $horizontal = $options['paginate']==='horizontal';
+        $total = count($parts);
+        foreach(['numbered'=>'article-page-numbers','partList'=>'article-page-titles'] as $setting => $class) {
+            $row = $horizontal && $setting==='numbered';
+            if(!$settings[$setting] && !$row) continue;
+            $output .= '<ol class="'.$class.($row ? ' article-page-horizontal" role="list" style="display:flex;flex-wrap:wrap;align-items:center;gap:.65rem;list-style:none;padding:0' : '').'">';
+            if($row) {
+                $previous = $current>1 ? $this->link($url($current-1),'Previous',' rel="prev"') : '<span aria-disabled="true">Previous</span>';
+                $output .= '<li>'.$previous.'</li>';
+            }
+            $last = 0;
+            foreach($parts as $index => $part) {
+                $number = $index+1;
+                if($row && $total>7 && $number!==1 && $number!==$total) {
+                    $start = max(2,min($current-1,$total-3));
+                    if($number<$start || $number>$start+2) continue;
+                }
+                if($row && $number>$last+1) $output .= '<li class="article-page-gap" aria-hidden="true">…</li>';
+                $last = $number;
+                $label = $setting==='numbered' ? (string)$number : $part['title'];
+                $attributes = $number===$current ? ' aria-current="page"' : '';
+                if($setting==='numbered') $attributes .= ' aria-label="'.$this->escape('Page '.$number.' '.$part['title']).'"';
+                $output .= '<li>'.$this->link($url($number), $label, $attributes).'</li>';
+            }
+            if($row) {
+                $next = $current<$total ? $this->link($url($current+1),'Next',' rel="next"') : '<span aria-disabled="true">Next</span>';
+                $output .= '<li>'.$next.'</li>';
+            }
+            $output .= '</ol>';
+        }
+        if($options['named']==='on' || ($options['named']==='default' && $settings['neighbours'])) {
+            $output .= '<div class="article-page-neighbours">';
+            if($current>1) $output .= $this->link($url($current-1), '← '.$parts[$current-2]['title'], ' rel="prev"');
+            if($current<count($parts)) $output .= $this->link($url($current+1), $parts[$current]['title'].' →', ' rel="next"');
+            $output .= '</div>';
+        }
+        return $output === '' ? '' : '<nav class="article-pagination" aria-label="Article pages">'.$output.'</nav>';
+    }
+
+    private function link(string $href, string $label, string $attributes = ''): string {
+        return '<a href="'.$this->escape($href).'"'.$attributes.'>'.$this->escape($label).'</a>';
+    }
+
+    private function escape(string $value): string {
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    }
+}
